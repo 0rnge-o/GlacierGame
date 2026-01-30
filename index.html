@@ -398,15 +398,6 @@
                     <div>Circle</div>
                 </div>
             </div>
-            
-            <!-- ZOOM CONTROLS -->
-            <h3 style="color:#00f2fe; margin-top: 30px; width: 100%; text-align: center;">ZOOM LEVEL</h3>
-            <input type="range" min="0.5" max="2" step="0.1" value="1" class="zoom-slider" id="zoom-slider" oninput="updateZoomPreview(this.value)">
-            <div class="zoom-value" id="zoom-value">100%</div>
-            <div class="zoom-preview" id="zoom-preview">
-                <div>Zoom Preview</div>
-            </div>
-            <button class="menu-btn" onclick="applyZoom()" style="margin-top: 10px; width: 100%">APPLY ZOOM</button>
         </div>
         <button class="menu-btn" onclick="closeSettings()">BACK</button>
     </div>
@@ -562,11 +553,10 @@ let gameState="MENU", previousState="MENU";
 let gameSettings = { 
     bloom: false, 
     fps: false,
-    mouseType: 'crosshair',
-    zoomLevel: 1.0
+    mouseType: 'crosshair'
 };
 let animationFrameId, transitionTimer;
-let keys = { w:false, a:false, s:false, d:false, space:false, q:false, e:false };
+let keys = { w:false, a:false, s:false, d:false, space:false, q:false, e:false, arrowUp:false, arrowDown:false, arrowLeft:false, arrowRight:false };
 let mouse = { x: 0, y: 0, wx: 0, wy: 0, down: false };
 let camera = { x: 0, y: 0 };
 let screenShake = 0;
@@ -581,6 +571,8 @@ let spawnTimer = 0;
 let askedQuestions = []; 
 let triviaAnswered = false;
 let triviaLocked = false; // NEW: Prevent multiple answer clicks
+let nextLevelIsModule = false; // When true, next level-up shows module pick (after wrong on module level)
+let introKeysHeldWhenShown = {}; // Keys that were held when zone intro appeared; continue only on different key or click
 
 // TIME & FPS
 let lastTime = 0;
@@ -887,20 +879,6 @@ function updateCanvasCursor() {
     }
 }
 
-function updateZoomPreview(value) {
-    gameSettings.zoomLevel = parseFloat(value);
-    document.getElementById('zoom-value').textContent = `${Math.round(value * 100)}%`;
-    
-    const preview = document.getElementById('zoom-preview');
-    preview.style.transform = `scale(${value})`;
-    preview.style.transformOrigin = "center center";
-}
-
-function applyZoom() {
-    // Zoom is applied through camera scaling in the render function
-    addFloat(`ZOOM: ${Math.round(gameSettings.zoomLevel * 100)}%`, player.x, player.y, "#00f2fe");
-}
-
 function startGame() { 
     if(animationFrameId) cancelAnimationFrame(animationFrameId);
     if(transitionTimer) clearTimeout(transitionTimer);
@@ -908,6 +886,7 @@ function startGame() {
     updateCanvasCursor();
     
     depthIndex = 0;
+    nextLevelIsModule = false;
     resetPlayer();
     showZoneIntro(); // Show intro instead of directly starting
     
@@ -918,30 +897,43 @@ function startGame() {
 function showZoneIntro() {
     gameState = "INTRO";
     screens.zoneIntro.classList.remove('hidden');
+    // Remember which keys were held so we only continue on a *different* key or after release
+    introKeysHeldWhenShown = {
+        w: keys.w, a: keys.a, s: keys.s, d: keys.d, space: keys.space,
+        arrowUp: keys.arrowUp, arrowDown: keys.arrowDown, arrowLeft: keys.arrowLeft, arrowRight: keys.arrowRight
+    };
     
     document.getElementById('zone-title').textContent = DEPTH_NAMES[depthIndex];
     document.getElementById('zone-description').innerHTML = ZONE_DESCRIPTIONS[depthIndex];
-    document.getElementById('zone-continue').textContent = "Press ANY KEY or CLICK to continue...";
+    document.getElementById('zone-continue').textContent = "Press a key or click to continue...";
     
-    // Set up continue handlers
     document.addEventListener('keydown', handleIntroContinue);
     canvas.addEventListener('click', handleIntroContinue);
 }
 
 function handleIntroContinue(e) {
-    // Allow any key or click to continue
     if (gameState !== "INTRO") return;
     
-    // Prevent space from scrolling if that was the key pressed
-    if (e.type === 'keydown' && e.code === 'Space') {
-        e.preventDefault();
+    // Click always counts as "new" action - continue
+    if (e.type === 'click') {
+        document.removeEventListener('keydown', handleIntroContinue);
+        canvas.removeEventListener('click', handleIntroContinue);
+        screens.zoneIntro.classList.add('hidden');
+        startDepth();
+        return;
     }
     
-    // Clean up event listeners
+    // Keydown: only continue if this key was NOT already held when the intro appeared
+    // (so they must press a different key, or release and press again)
+    if (e.type === 'keydown') {
+        if (e.code === 'Space') e.preventDefault();
+        const codeToKey = { 'KeyW':'w','KeyA':'a','KeyS':'s','KeyD':'d','Space':'space','ArrowUp':'arrowUp','ArrowDown':'arrowDown','ArrowLeft':'arrowLeft','ArrowRight':'arrowRight' };
+        const keyName = codeToKey[e.code];
+        if (keyName && introKeysHeldWhenShown[keyName]) return; // still the same key held - ignore until they release or press another key
+    }
+    
     document.removeEventListener('keydown', handleIntroContinue);
     canvas.removeEventListener('click', handleIntroContinue);
-    
-    // Continue to the zone
     screens.zoneIntro.classList.add('hidden');
     startDepth();
 }
@@ -1035,7 +1027,7 @@ function spawnNextWave() {
 
         // HP and Speed Tweaks
         let hp = (35 + (depthIndex*10) + (wave*4)) * (1+(sides-3)*0.4);
-        let spd = Math.max(1.5, 5 - (sides*0.5) + (depthIndex*0.1)); 
+        let spd = Math.max(1.5, 5 - (sides*0.5) + (depthIndex*0.1)); // Original speed formula
         
         let ex, ey, dist;
         do {
@@ -1110,6 +1102,23 @@ function checkLevelUp() {
 function startTrivia() {
     triviaAnswered = false;
     triviaLocked = false; // Reset lock
+
+    // If they got the previous question wrong on a module level, this level-up is the module
+    if(nextLevelIsModule) {
+        nextLevelIsModule = false;
+        const unacquired = abilitiesDB.filter(a => {
+            if(a.id==='shock' && player.hasShock) return false;
+            if(a.id==='mag' && player.hasMag) return false;
+            if(a.id==='multi' && player.hasMulti) return false;
+            if(a.id==='shield' && player.hasShield) return false;
+            return true;
+        });
+        if(unacquired.length > 0) {
+            triggerUnlock(unacquired);
+            return;
+        }
+    }
+
     gameState = "TRIVIA";
     screens.trivia.classList.remove('hidden');
     document.getElementById('t-status').innerText = "";
@@ -1200,6 +1209,16 @@ function checkAnswer(isCorrect, clickedBtn) {
         clickedBtn.style.borderColor = "#ff2a6d";
         
         shake(10);
+        // Wrong on a level that would have been module (every 4 levels): next level-up = module
+        const unacquired = abilitiesDB.filter(a => {
+            if(a.id==='shock' && player.hasShock) return false;
+            if(a.id==='mag' && player.hasMag) return false;
+            if(a.id==='multi' && player.hasMulti) return false;
+            if(a.id==='shield' && player.hasShield) return false;
+            return true;
+        });
+        if(player.lvl % 4 === 0 && unacquired.length > 0) nextLevelIsModule = true;
+
         setTimeout(() => {
             screens.trivia.classList.add('hidden');
             gameState = "PLAY";
@@ -1376,10 +1395,6 @@ function applyCamera() {
     camera.y += (targetY - camera.y)*0.1;
     
     // Apply zoom scaling
-    ctx.translate(canvas.width/2, canvas.height/2);
-    ctx.scale(gameSettings.zoomLevel, gameSettings.zoomLevel);
-    ctx.translate(-canvas.width/2, -canvas.height/2);
-    
     ctx.translate(-camera.x+sx, -camera.y+sy);
 }
 
@@ -1407,7 +1422,7 @@ function update(dt) {
                 hideAll();
                 screens.win.classList.remove('hidden');
             } else {
-                showZoneIntro(); // Show intro for next zone
+                showZoneIntro(); // Always show intro for next zone
             }
             return;
         }
@@ -1461,16 +1476,24 @@ function update(dt) {
     }
     updateSkillUI();
 
-    // Shooting
+    // Aim: arrow keys override mouse when any arrow is held
     let angle = Math.atan2(mouse.wy-player.y, mouse.wx-player.x);
+    if(keys.arrowUp || keys.arrowDown || keys.arrowLeft || keys.arrowRight) {
+        const dy = (keys.arrowDown ? 1 : 0) - (keys.arrowUp ? 1 : 0);
+        const dx = (keys.arrowRight ? 1 : 0) - (keys.arrowLeft ? 1 : 0);
+        if(dx !== 0 || dy !== 0) angle = Math.atan2(dy, dx);
+    }
+    player.aimAngle = angle;
+
+    // Shooting
     if(player.cd>0) player.cd -= dt;
     else {
         player.shotCount++;
         let isPierce = (player.shotCount % 4 === 0) || (player.multiActive > 0);
         
-        // Base Shot
+        // Base Shot (use player.aimAngle)
         bullets.push({
-            x:player.x, y:player.y, vx:Math.cos(angle)*player.bulletSpd, vy:Math.sin(angle)*player.bulletSpd,
+            x:player.x, y:player.y, vx:Math.cos(player.aimAngle)*player.bulletSpd, vy:Math.sin(player.aimAngle)*player.bulletSpd,
             pierce: isPierce, hitList: [] 
         });
 
@@ -1769,8 +1792,9 @@ function drawRoom() {
     });
     ctx.globalCompositeOperation = 'source-over';
 
-    // Player (No dot)
-    ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(Math.atan2(mouse.wy - player.y, mouse.wx - player.x));
+    // Player (No dot) - use aim angle (arrow keys or mouse)
+    const drawAngle = (typeof player.aimAngle === 'number') ? player.aimAngle : Math.atan2(mouse.wy - player.y, mouse.wx - player.x);
+    ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(drawAngle);
     ctx.fillStyle = "#000"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
     ctx.shadowBlur=15; ctx.shadowColor="#00f2fe";
     ctx.beginPath(); ctx.moveTo(20, 0); ctx.lineTo(-15, 15); ctx.lineTo(-8, 0); ctx.lineTo(-15, -15); ctx.closePath();
@@ -1791,12 +1815,12 @@ window.addEventListener('resize', ()=>{ canvas.width=window.innerWidth; canvas.h
 // FIX FOR CHROMEBOOK INPUT ISSUE
 window.addEventListener('focus', () => {
     // Reset all keys to false when window regains focus
-    keys = { w:false, a:false, s:false, d:false, space:false, q:false, e:false };
+    keys = { w:false, a:false, s:false, d:false, space:false, q:false, e:false, arrowUp:false, arrowDown:false, arrowLeft:false, arrowRight:false };
 });
 
 window.addEventListener('keydown', e=>{ 
-    // Prevent default for space to avoid scrolling
-    if(e.code === 'Space') e.preventDefault();
+    // Prevent default for space and arrows to avoid scrolling
+    if(e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight') e.preventDefault();
     
     if(e.key==='w' || e.key==='W') keys.w=true; 
     if(e.key==='a' || e.key==='A') keys.a=true; 
@@ -1805,6 +1829,10 @@ window.addEventListener('keydown', e=>{
     if(e.key===' ') { keys.space=true; } 
     if(e.key==='q' || e.key==='Q') keys.q=true; 
     if(e.key==='e' || e.key==='E') keys.e=true;
+    if(e.code==='ArrowUp') keys.arrowUp=true;
+    if(e.code==='ArrowDown') keys.arrowDown=true;
+    if(e.code==='ArrowLeft') keys.arrowLeft=true;
+    if(e.code==='ArrowRight') keys.arrowRight=true;
     
     if(e.key==='Escape') { 
         if(!screens.settings.classList.contains('hidden')) closeSettings();
@@ -1826,6 +1854,10 @@ window.addEventListener('keyup', e=>{
     if(e.key===' ') keys.space=false; 
     if(e.key==='q' || e.key==='Q') keys.q=false; 
     if(e.key==='e' || e.key==='E') keys.e=false;
+    if(e.code==='ArrowUp') keys.arrowUp=false;
+    if(e.code==='ArrowDown') keys.arrowDown=false;
+    if(e.code==='ArrowLeft') keys.arrowLeft=false;
+    if(e.code==='ArrowRight') keys.arrowRight=false;
 });
 
 window.addEventListener('mousemove', e=>{ 
